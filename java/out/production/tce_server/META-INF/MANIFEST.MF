@@ -1,0 +1,4 @@
+Manifest-Version: 1.0
+Class-Path: bcprov-jdk15on-151.jar bcpg-jdk15on-151.jar
+Main-Class: edu.harvard.law.lil.KeyFileTool
+

@@ -1,0 +1,6 @@
+.idea
+*.sqlite3
+*.pyc
+
+*.msg
+bc*.jar

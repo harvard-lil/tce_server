@@ -1,0 +1,41 @@
+<html>
+    <body>
+        <h1>Time Capsule Encryption</h1>
+
+        <h2>Download public keys to send messages into the future ...</h2>
+
+        <table>
+            <tr>
+                <th>Release Date</th><th>Public Key</th>
+            </tr>
+            {% for keypair in public_keys %}
+                <tr>
+                    <td>{{ keypair.release_date_display }}</td>
+                    <td>
+                        {% if keypair.public_key_file %}
+                            <a href="{% url 'public_key_file' keypair.pk %}">download encryption key</a>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+        </table>
+
+        <h2>Download private keys to decrypt messages from the past ...</h2>
+
+        <table>
+            <tr>
+                <th>Release Date</th><th>Private Key</th>
+            </tr>
+            {% for keypair in private_keys %}
+                <tr>
+                    <td>{{ keypair.release_date_display }}</td>
+                    <td>
+                        {% if keypair.private_key_file %}
+                            <a href="{% url 'private_key_file' keypair.pk %}">download decryption key</a>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+        </table>
+    </body>
+</html>
