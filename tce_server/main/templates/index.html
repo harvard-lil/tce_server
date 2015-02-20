@@ -6,7 +6,7 @@
 
         <table>
             <tr>
-                <th>Release Date</th><th>Public Key</th>
+                <th>Release Date</th><th>Public Key</th><th>Upload</th>
             </tr>
             {% for keypair in public_keys %}
                 <tr>
@@ -16,15 +16,32 @@
                             <a href="{% url 'public_key_file' keypair.pk %}">download encryption key</a>
                         {% endif %}
                     </td>
+                    <td>
+                        <form action="{% url 'encrypt' keypair.pk %}" method="post" enctype="multipart/form-data">
+                            {% csrf_token %}
+                            Encrypt file server-side:
+                            <input type="file" name="file">
+                            <input type="submit" value="Encrypt" name="submit">
+                        </form>
+                    </td>
                 </tr>
             {% endfor %}
         </table>
 
         <h2>Download private keys to decrypt messages from the past ...</h2>
 
+        <div>
+            <form action="{% url 'decrypt' %}" method="post" enctype="multipart/form-data">
+                {% csrf_token %}
+                Decrypt file server-side:
+                <input type="file" name="file">
+                <input type="submit" value="Decrypt" name="submit">
+            </form>
+        </div>
+
         <table>
             <tr>
-                <th>Release Date</th><th>Private Key</th>
+                <th>Release Date</th><th>Private Key</th><th>Upload</th>
             </tr>
             {% for keypair in private_keys %}
                 <tr>
@@ -33,6 +50,8 @@
                         {% if keypair.private_key_file %}
                             <a href="{% url 'private_key_file' keypair.pk %}">download decryption key</a>
                         {% endif %}
+                    </td>
+                    <td>
                     </td>
                 </tr>
             {% endfor %}

@@ -1,17 +1,19 @@
 from functools import wraps
 import json
-import dateutil.parser
+from pgpdump import AsciiData, BinaryData
 
-from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
 from django.db import DatabaseError
 from django.http import HttpResponseForbidden, HttpResponseBadRequest, HttpResponse, HttpResponseNotAllowed, Http404
 from django.shortcuts import render, get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
+from pgpdump.packet import PublicKeyEncryptedSessionKeyPacket
+from pgpdump.utils import PgpdumpException
 
 from .models import Message, KeyPair
 from scripts.gpg_utils import load_gpg
 
+### view helpers ###
 
 def get_user_from_api_key(f):
     @wraps(f)
@@ -47,6 +49,14 @@ def log_function_io(f):
             raise
         return result
     return wrapper
+
+def deliver_file(data, content_type, delivery_name):
+    response = HttpResponse(data, content_type=content_type)
+    response['Content-Disposition'] = 'attachment; filename="%s"' % delivery_name
+    return response
+
+
+### trustee message passing views ###
 
 @get_user_from_api_key
 def get_messages(request):
@@ -110,29 +120,89 @@ def send_message(request):
     return HttpResponse("OK")
 
 
-def deliver_key_file(data, delivery_name):
-    response = HttpResponse(data, content_type='application/pgp-keys')
-    response['Content-Disposition'] = 'attachment; filename="%s"' % delivery_name
-    return response
+### keypair download views ###
 
 def public_key_file(request, key_id):
     keypair = get_object_or_404(KeyPair, id=key_id)
     if not keypair.public_key_file:
         raise Http404
-    return deliver_key_file(
-        keypair.public_key_file,
-        "Time capsule public key for %s.asc" % keypair.release_date_display())
+    return deliver_file(keypair.public_key_file, 'application/pgp-keys', "Time capsule public key for %s.asc" % keypair.release_date_display())
 
 
 def private_key_file(request, key_id):
     keypair = get_object_or_404(KeyPair, id=key_id)
     if not keypair.private_key_file:
         raise Http404
-    # keypair.generate_key_files()
-    return deliver_key_file(
-        keypair.private_key_file,
-        "Time capsule private key for %s.asc" % keypair.release_date_display())
+    return deliver_file(keypair.private_key_file, 'application/pgp-keys', "Time capsule private key for %s.asc" % keypair.release_date_display())
 
+
+### server-side encrypt/decrypt views ###
+
+def encrypt(request, key_id):
+
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    keypair = get_object_or_404(KeyPair, id=key_id)
+    if not keypair.public_key_file:
+        return HttpResponseBadRequest("Can't encrypt -- no public key available.")
+
+    uploaded_file = request.FILES.get('file')
+    if not uploaded_file:
+        return HttpResponseBadRequest("Please supply a file upload.")
+
+    with load_gpg([keypair.public_key_file]) as gpg:
+        output = gpg.encrypt(uploaded_file.read(), gpg.list_keys().fingerprints[0])
+
+    return deliver_file(output, 'application/pgp-encrypted', uploaded_file.name+'.gpg')
+
+def decrypt(request):
+
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    uploaded_file = request.FILES.get('file')
+    if not uploaded_file:
+        return HttpResponseBadRequest("Please supply a file upload.")
+
+    # parse file for key id
+    file_contents = uploaded_file.read()
+    try:
+        parsed_file = AsciiData(file_contents)
+    except PgpdumpException:
+        try:
+            parsed_file = BinaryData(file_contents)
+        except PgpdumpException:
+            return HttpResponseBadRequest("Can't parse PGP file.")
+    public_key_packet = next(packet for packet in parsed_file.packets() if type(packet)==PublicKeyEncryptedSessionKeyPacket)
+    elgamal_key_id = public_key_packet.key_id
+
+    # get key
+    try:
+        keypair = KeyPair.objects.get(elgamal_key_id=elgamal_key_id)
+    except KeyPair.DoesNotExist:
+        return HttpResponseBadRequest("No key was found matching this file.")
+    if not keypair.private_key_file:
+        return HttpResponseBadRequest("We do not yet have a private key to decrypt this file (release date %s)." % keypair.release_date_display())
+
+    # decrypt
+    with load_gpg([keypair.private_key_file]) as gpg:
+        output = gpg.decrypt(file_contents, always_trust=True)
+
+    if not output.ok:
+        return HttpResponseBadRequest("Unable to decrypt file.")
+
+    # deliver
+    if output.data_filename:
+        output_name = output.data_filename
+    else:
+        output_name = uploaded_file.name
+        if output_name.endswith('.gpg'):
+            output_name = output_name[:-4]
+    return deliver_file(output.data, 'application/octet-stream', output_name)
+
+
+### home ###
 
 def index(request):
     public_keys = KeyPair.objects.filter(status='have_public_key').exclude(public_key_file='').order_by('-release_date')

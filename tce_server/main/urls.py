@@ -6,5 +6,9 @@ urlpatterns = patterns('main.views',
 
     url(r'^key/(?P<key_id>\d+)/public/$', 'public_key_file', name='public_key_file'),
     url(r'^key/(?P<key_id>\d+)/private/$', 'private_key_file', name='private_key_file'),
+    url(r'^key/(?P<key_id>\d+)/encrypt/$', 'encrypt', name='encrypt'),
+
+    url(r'^decrypt/$', 'decrypt', name='decrypt'),
+
     url(r'^$', 'index', name='index'),
 )

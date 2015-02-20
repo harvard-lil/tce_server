@@ -13,6 +13,8 @@ from django.db import models
 from django.db.models.signals import post_save
 from django.utils.functional import cached_property
 from django.utils import dateformat
+from pgpdump import AsciiData
+from pgpdump.packet import PublicSubkeyPacket
 
 from scripts.gpg_utils import load_gpg
 from scripts.multielgamal import MultiElGamal
@@ -94,6 +96,7 @@ class KeyPair(models.Model):
     public_key_file = models.TextField(blank=True)
     temp_private_key_file = models.TextField(blank=True)
     private_key_file = models.TextField(blank=True)
+    elgamal_key_id = models.CharField(unique=True, max_length=255, blank=True, null=True)
 
     def __unicode__(self):
         return self.uuid
@@ -217,7 +220,7 @@ class KeyPair(models.Model):
         public_key_file.close()
         private_key_file = tempfile.NamedTemporaryFile(delete=False)
         private_key_file.close()
-        
+
         subprocess.check_call(['java', '-jar', settings.CREATE_KEY_FILE_JAR, 'create', hex_out(self.p), hex_out(self.g), hex_out(self.y), private_key_file.name, public_key_file.name, "Time capsule key for %s" % self.release_date_display()])
 
         self.public_key_file = open(public_key_file.name).read()
@@ -225,6 +228,11 @@ class KeyPair(models.Model):
 
         public_key_file.unlink(public_key_file.name)
         private_key_file.unlink(private_key_file.name)
+
+        # get key id
+        parsed_key = AsciiData(self.public_key_file)
+        elgamal_packet = next(packet for packet in parsed_key.packets() if type(packet)==PublicSubkeyPacket)
+        self.elgamal_key_id = elgamal_packet.key_id
 
         self.save()
 
