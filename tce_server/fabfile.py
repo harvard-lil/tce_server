@@ -1,6 +1,8 @@
+from collections import OrderedDict
 from datetime import datetime, timedelta
 import glob
 import json
+import subprocess
 import time
 import gnupg
 import os
@@ -35,7 +37,7 @@ def generate_keys():
         )
 
 
-def run_trustee(id):
+def run_trustees():
     # helpers
 
     def glob_copy(src, dst):
@@ -49,54 +51,77 @@ def run_trustee(id):
     # var setup
 
     server = "http://127.0.0.1:8000/"
-
-    offline_root_dir = os.path.join(os.path.dirname(settings.BASE_DIR), "test/offline_servers", id)
-    offline_outgoing_dir = os.path.join(offline_root_dir, "outgoing_messages")
-    offline_outgoing_archive_dir = os.path.join(offline_outgoing_dir, "archive")
-    offline_incoming_dir = os.path.join(offline_root_dir, "incoming_messages")
-
-    online_root_dir = os.path.join(os.path.dirname(settings.BASE_DIR), "test/online_servers", id)
-    online_outgoing_dir = os.path.join(online_root_dir, 'messages_for_offline_server')
-    online_outgoing_archive_dir = os.path.join(online_outgoing_dir, 'archive')
-    online_incoming_dir = os.path.join(online_root_dir, 'messages_for_public_server')
-    online_incoming_archive_dir = os.path.join(online_incoming_dir, 'archive')
-
     script_dir = os.path.join(settings.BASE_DIR, "scripts/offline_processor.py")
 
+    trustees = OrderedDict()
+
+    for trustee_name in ["1", "2", "3"]:
+        trustee = {}
+
+        trustee["offline_root_dir"] = os.path.join(os.path.dirname(settings.BASE_DIR), "test/offline_servers", trustee_name)
+        trustee["offline_outgoing_dir"] = os.path.join(trustee["offline_root_dir"], "outgoing_messages")
+        trustee["offline_outgoing_archive_dir"] = os.path.join(trustee["offline_outgoing_dir"], "archive")
+        trustee["offline_incoming_dir"] = os.path.join(trustee["offline_root_dir"], "incoming_messages")
+
+        trustee["online_root_dir"] = os.path.join(os.path.dirname(settings.BASE_DIR), "test/online_servers", trustee_name)
+        trustee["online_outgoing_dir"] = os.path.join(trustee["online_root_dir"], 'messages_for_offline_server')
+        trustee["online_outgoing_archive_dir"] = os.path.join(trustee["online_outgoing_dir"], 'archive')
+        trustee["online_incoming_dir"] = os.path.join(trustee["online_root_dir"], 'messages_for_public_server')
+        trustee["online_incoming_archive_dir"] = os.path.join(trustee["online_incoming_dir"], 'archive')
+
+        trustees[trustee_name] = trustee
+
     while True:
-        ## simulate online server script ##
 
-        # download new messages to online server inbox
-        known_messages = [fname for fname in list(os.listdir(online_outgoing_dir))+list(os.listdir(online_outgoing_archive_dir)) if fname.endswith('.msg')]
-        highest_message_id = max(int(fname.split('.msg')[0]) for fname in known_messages) if known_messages else 0
-        data = requests.post(server+"get_messages/", data={'api_key':id, 'after_id':str(highest_message_id)}).content
-        if data != "[]":
-            for message_id, message in json.loads(data):
-                open(os.path.join(online_outgoing_dir, "%s.msg" % message_id), 'w').write(message)
+        for trustee_name, trustee in trustees.items():
 
-        # upload messages from online server outbox to public server
-        for fname in glob.glob(online_incoming_dir+'/*.msg'):
-            print "Loading %s" % fname
-            contents = open(fname).read()
-            result = requests.post(server+"send_message/", data={'api_key':id, 'message':contents})
-            if result.status_code != 200:
-                print "Unexpected result %s: %s" % (result.status_code, result.content)
-            shutil.move(fname, online_incoming_archive_dir)
+            print "--------- TRUSTEE %s ---------" % trustee_name
 
-        ## simulate trustee user ##
+            # download new messages to online server inbox
+            print "Local server is downloading messages from central server."
+            known_messages = [fname for fname in list(os.listdir(trustee["online_outgoing_dir"]))+list(os.listdir(trustee["online_outgoing_archive_dir"])) if fname.endswith('.msg')]
+            highest_message_id = max(int(fname.split('.msg')[0]) for fname in known_messages) if known_messages else 0
+            try:
+                response = requests.post(server+"get_messages/", data={'api_key':trustee_name, 'after_id':str(highest_message_id)})
+                assert response.ok
+                data = response.content
+                if data != "[]":
+                    for message_id, message in json.loads(data):
+                        open(os.path.join(trustee["online_outgoing_dir"], "%s.msg" % message_id), 'w').write(message)
+            except (requests.ConnectionError, AssertionError):
+                print "Unable to reach central server!"
+            time.sleep(.5)
 
-        # copy messages to offline server inbox
-        glob_copy(online_outgoing_dir+'/*.msg', offline_incoming_dir)
-        # move online messages to online server archive
-        glob_move(online_outgoing_dir+'/*.msg', online_outgoing_archive_dir)
-        # process offline messages
-        local("python '%s' '%s'" % (script_dir, offline_root_dir))
-        # copy messages to online server public box
-        glob_copy(offline_outgoing_dir + '/*.msg', online_incoming_dir)
-        # move offline messages to offline server archive
-        glob_move(offline_outgoing_dir + '/*.msg', offline_outgoing_archive_dir)
+            print "Employee is copying messages to the offline laptop for processing."
+            # copy messages to offline server inbox
+            glob_copy(trustee["online_outgoing_dir"] + '/*.msg', trustee["offline_incoming_dir"])
+            # move online messages to online server archive
+            glob_move(trustee["online_outgoing_dir"] + '/*.msg', trustee["online_outgoing_archive_dir"])
 
-        time.sleep(1)
+            # process offline messages
+            subprocess.call(["python", script_dir, trustee["offline_root_dir"]])
+            time.sleep(.5)
+
+            print "Employee is copying responses back to the local server."
+            # copy messages to online server public box
+            glob_copy(trustee["offline_outgoing_dir"] + '/*.msg', trustee["online_incoming_dir"])
+            # move offline messages to offline server archive
+            glob_move(trustee["offline_outgoing_dir"] + '/*.msg', trustee["offline_outgoing_archive_dir"])
+            time.sleep(.5)
+
+            print "Local server is copying responses back to the central server."
+            # upload messages from online server outbox to public server
+            for fname in glob.glob(trustee["online_incoming_dir"]+'/*.msg'):
+                print "Loading %s" % fname
+                contents = open(fname).read()
+                try:
+                    response = requests.post(server+"send_message/", data={'api_key':trustee_name, 'message':contents})
+                    assert response.ok
+                except (requests.ConnectionError, AssertionError):
+                    print "Unable to reach central server!"
+                shutil.move(fname, trustee["online_incoming_archive_dir"])
+
+            time.sleep(1)
 
 def make_key(release_date=None):
     if not release_date:
