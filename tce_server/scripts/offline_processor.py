@@ -244,17 +244,9 @@ def generate_key(message, release_date=None):
     # send recovery shares and commitments to the other trustees
     shares, commitments = mg.generate_shares(x, share_count=len(other_servers), recovery_threshold=settings["recovery_count"])
 
-    # we prepare three layers of messages here --
+    # we prepare two layers of messages here --
     # the individual messages with private shares for each other trustee,
-    # the group message with commitments that goes to all trustees,
-    # and the public message that goes to the control server
-
-    # public message
-    public_message = {
-        'p': mg.p,
-        'g': mg.g,
-        'y_share': y
-    }
+    # the group message with commitments that goes to all trustees
 
     # individual messages
     individual_messages = {}
@@ -269,15 +261,18 @@ def generate_key(message, release_date=None):
     # group message
     # double-encode the group_message as a JSON string, so servers can compare the hash to confirm they're looking at the same message
     group_message_mixin = {
-        'group_message':json.dumps(dict(public_message, **{
+        'group_message':json.dumps({
+            'p': mg.p,
+            'g': mg.g,
+            'release_date': release_date,
+
+            'y_share': y,
             'share_recipients': share_recipients,
             'commitments': commitments,
-        })),
+        }),
     }
 
-    messages = message_other_servers('store_share', key_id, group_message_mixin, individual_messages)
-    messages.append(package_message('public_key', 'public', key_id, public_message))
-    return messages
+    return message_other_servers('store_share', key_id, group_message_mixin, individual_messages)
 
 
 @message_handler

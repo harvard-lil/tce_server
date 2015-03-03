@@ -124,12 +124,10 @@ class KeyPair(models.Model):
         if len(confirmation_messages) < expected_share_count:
             return
 
-        errors = defaultdict(list)
+        errors = {}
 
         # check if we have all the public key shares
-        shares_by_trustee = dict((m.from_trustee, m) for m in self.messages.filter(message_type='public_key'))
-        if set(shares_by_trustee.keys()) != set(self.trustees.all()):
-            errors['shares'].append("Failed to receive one share from each trustee.")
+        y_shares_by_trustee = {}
 
         # parse the confirmation messages
         confirmations = []
@@ -146,24 +144,33 @@ class KeyPair(models.Model):
         confirmations.sort(key=lambda c: c['confirmed_server'].pk)
         grouped_confirmations = itertools.groupby(confirmations, lambda c: c['confirmed_server'].pk)  # must be sorted first
         for confirmed_server_id, confirmations in grouped_confirmations:
+            server_errors = []
+
             confirmations = list(confirmations)
             confirmed_server = confirmations[0]['confirmed_server']
             if len(confirmations) != trustee_count-1:
-                errors[confirmed_server.fingerprint].append("Wrong number of confirmations received.")
+                server_errors.append("Wrong number of confirmations received.")
 
             if len(set(c['message_hash'] for c in confirmations)) != 1:
-                errors[confirmed_server.fingerprint].append("Message hashes do not match.")
+                server_errors.append("Message hashes do not match.")
+
+            if len(set(c['y_share'] for c in confirmations)) != 1:
+                server_errors.append("Y shares do not match.")
 
             if set(c['share_input'] for c in confirmations) != set(range(1, len(confirmations)+1)):
-                errors[confirmed_server.fingerprint].append("Wrong set of share inputs.")
+                server_errors.append("Wrong set of share inputs.")
 
             for c in confirmations:
                 if not c['is_valid']:
-                    errors[confirmed_server.fingerprint].append("Server %s reports share is invalid." % c['confirming_server'].fingerprint)
-                public_share = shares_by_trustee[confirmed_server]
-                if public_share:  # to allow a complete error report, we only check this one if we don't already have an error about missing shares
-                    if c['y_share'] != public_share.content_dict['y_share']:
-                        errors[confirmed_server.fingerprint].append("Server %s reports y share doesn't match." % c['confirming_server'].fingerprint)
+                    server_errors.append("Server %s reports share is invalid." % c['confirming_server'].fingerprint)
+
+            if server_errors:
+                errors[confirmed_server.fingerprint] = server_errors
+            else:
+                y_shares_by_trustee[confirmed_server] = confirmations[0]['y_share']
+
+        if set(y_shares_by_trustee.keys()) != set(self.trustees.all()):
+            errors['__all__'] = 'Failed to recover all expected y values.'
 
         if errors:
             self.status = 'public_key_failed'
@@ -172,7 +179,7 @@ class KeyPair(models.Model):
         else:
             self.status = 'have_public_key'
             mg = MultiElGamal(p=self.p, g=self.g)
-            self.y = mg.combine_public_keys(s.content_dict['y_share'] for s in shares_by_trustee.values())
+            self.y = mg.combine_public_keys(y_share for y_share in y_shares_by_trustee.values())
 
         self.save()
 
@@ -270,7 +277,7 @@ class Message(models.Model):
     from_trustee = models.ForeignKey(Trustee, blank=True, null=True, related_name='messages_sent')
     to_trustee = models.ForeignKey(Trustee, blank=True, null=True, related_name='messages_received')
     timestamp = models.DateTimeField()
-    message_type = models.CharField(max_length=20, choices=((i,i) for i in ('generate_key', 'public_key', 'store_share', 'confirm_share', 'release_key')))
+    message_type = models.CharField(max_length=20, choices=((i,i) for i in ('generate_key', 'store_share', 'confirm_share', 'release_key')))
     keypair = models.ForeignKey(KeyPair, related_name='messages')
     content = models.TextField()
 
