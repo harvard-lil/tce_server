@@ -1,27 +1,29 @@
-Network Time Travel Protocol
+Time Capsule Encryption Network
+============================
+Design Documentation and Protocol Specification
 ============================
 
 ## Introduction
 
-Network Time Travel Protocol (NTTP) is a network service allowing messages to be encrypted so they cannot be decrypted until a certain amount of time has passed.
+This is a network service allowing messages to be encrypted so they cannot be decrypted until a certain amount of time has passed.
 
 The system depends on a group of trusted keyholders, known as `Trustees`, who generate and publish public and private keys according to a fixed schedule. 
 
-To **encrypt** a message, a user queries the NTTP server for a date in the future. The server returns the closest available public key along with a `release date` -- the date the corresponding private key will be available. If the release date is acceptable, the user encrypts the message with the public key. The user can and should verify that the key has been signed by the proper Trustees.
+To **encrypt** a message, a user queries the server for a date in the future. The server returns the closest available public key along with a `release date` -- the date the corresponding private key will be available. If the release date is acceptable, the user encrypts the message with the public key. The user can and should verify that the key has been signed by the proper Trustees.
  
-To **decrypt** a message, a user queries the NTTP server for a date in the past, or for a key fingerprint. Private keys are available only after the release date.
+To **decrypt** a message, a user queries the server for a date in the past, or for a key fingerprint. Private keys are available only after the release date.
 
 The Trustees generate and share keys using verifiable threshold secret sharing, so the private key *cannot* be published prior to the release date without compromising a given threshold of Trustees. Likewise, the private key *will* be recoverable after the release date as long as the threshold number of Trustees remain uncompromised.
 
 ## Cryptographic theory
 
-NTTP implements the cryptographic protocol described in [M. O. Rabin and C. Thorpe. Time-lapse cryptography. Technical Report TR-22-06, Harvard University School of Engineering and Computer Science, 2006.](http://www.eecs.harvard.edu/~cat/tlc.pdf) In short, the protocol uses Pedersen distributed key generation to generate and publish ElGamal keypairs according to a fixed schedule.
+This system implements the cryptographic protocol described in [M. O. Rabin and C. Thorpe. Time-lapse cryptography. Technical Report TR-22-06, Harvard University School of Engineering and Computer Science, 2006.](http://www.eecs.harvard.edu/~cat/tlc.pdf) In short, the protocol uses Pedersen distributed key generation to generate and publish ElGamal keypairs according to a fixed schedule.
 
 Any implementation differences from the Rabin & Thorpe paper should be noted below.
 
 ## Implementation philosophy
 
-This first version of NTTP is designed to be simple and secure, at the expense of automation and availability:
+This implementation is designed to be simple and secure, at the expense of automation and availability:
 
 * Private key material is kept only on offline servers. Each round of key generation and release requires human operators to migrate and process data manually. 
 * Key generation fails in the presence of improper Trustees (unlike Pedersen/Rabin & Thorpe, where key generation can continue with the subset of proper parties). If a Trustee fails to follow the protocol, key generation noisily fails until the problem is corrected manually.
@@ -89,7 +91,22 @@ The Outbox Server is kept separate from the Inbox Server so that it can be confi
 
 ## Key generation protocol
 
+### Overview
+
 Keys are generated and published through a series of messages sent between the Coordination Server and the Trustees.
+
+Key generation proceeds in several steps:
+
+1. The Coordinator announces to the Trustees that a new keypair should be generated, identified by a universal unique identifier (UUID), and scheduled to be released on a certain date. Each Trustee generates a private `x` value, which will be its piece of the private key, and a public `y` value, which will be its piece of the public key. 
+2. Each Trustee splits its private `x` value into shares and sends those shares to the other Trustees. If any given Trustee loses its private value, it can be reconstructed by assembling a given threshold of shares from the other Trustees. 
+3. Each Trustee sends a confirmation to the Coordinator that it has received a valid share from each of the other Trustees. By examining those confirmations (which contain no secret information), the Coordinator or anyone else can confirm that the protocol is being followed correctly, and that the `x` values can all be recovered as long as the threshold number of Trustees remain uncompromised.
+4. The Coordinator generates a standard PGP public key using the `y` values received from the Trustees. The Coordinator asks each of the Trustees to compare the set of confirmations to the generated key, and to sign the key to indicate that it has been generated correctly. 
+
+Now the new PGP public key can be published by the Coordinator, and downloaded, verified and used to encrypt files by any user on the internet. Note that there is no corresponding private key yet: the private key won't exist until all of the `x` values are released by the Trustees and reassembled.
+
+Once per week, each Trustee checks its Offline Server for new outgoing messages. When the release date arrives, the Offline Server sends a message to the Coordinator with the private `x` value it generated earlier, and the shares of private `x` values it received from the other Trustees. As soon as the Coordinator receives the threshold number of releases, it uses them to generate and publish a standard PGP private key corresponding to the public key published earlier. Now any user can decrypt messages earlier encrypted with the public key.
+
+### Detailed structure of key generation messages
 
 This diagram shows the flow of messages for a simple network with three Trustees:
 
