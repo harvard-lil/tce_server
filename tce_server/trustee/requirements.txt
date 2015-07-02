@@ -1,0 +1,4 @@
+libnacl==1.4.3
+lockfile==0.10.2
+jsonschema==2.5.1
+PGPy==0.3.0

@@ -1,5 +1,0 @@
-- cron script
-- encrypt private database - http://charlesleifer.com/blog/encrypted-sqlite-databases-with-python-and-sqlcipher/
-- sign public keys by each trustee
-- track and display trustees for each key
-- upload form

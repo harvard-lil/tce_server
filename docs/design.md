@@ -5,254 +5,303 @@ Design Documentation and Protocol Specification
 
 ## Introduction
 
-This is a network service allowing messages to be encrypted so they cannot be decrypted until a certain amount of time has passed.
+This protocol provides for the generation of public encryption keys labeled with contracts that guarantee publication
+of the corresponding private key at a later date. Using these keys, messages can be sent "into the future" so they
+cannot be read until the contract date.
 
-The system depends on a group of trusted keyholders, known as `Trustees`, who generate and publish public and private keys according to a fixed schedule. 
+In particular, this protocol generates OpenPGP keys with contracts embedded in the user ID comment field, in the form:
 
-To **encrypt** a message, a user queries the server for a date in the future. The server returns the closest available public key along with a `release date` -- the date the corresponding private key will be available. If the release date is acceptable, the user encrypts the message with the public key. The user can and should verify that the key has been signed by the proper Trustees.
- 
-To **decrypt** a message, a user queries the server for a date in the past, or for a key fingerprint. Private keys are available only after the release date.
+    {
+        "state_digest": <digest>, 
+        "uuid": <uuid>, 
+        "contract": {
+            "release_date": "2015-06-25T21:12:33.652483+00:00", 
+            "recovery_threshold": recovery_threshold, 
+            "share_count": share_count
+        }
+    }
 
-The Trustees generate and share keys using verifiable threshold secret sharing, so the private key *cannot* be published prior to the release date without compromising a given threshold of Trustees. Likewise, the private key *will* be recoverable after the release date as long as the threshold number of Trustees remain uncompromised.
+A valid key must be signed by `share_count` Trustees, who are known and trusted by the user of the key. Each signature indicates 
+that a given Trustee has followed this protocol in generating and verifying the public key, and will release their share
+of the private key on the `release_date`.
 
-## Cryptographic theory
-
-This system implements the cryptographic protocol described in [M. O. Rabin and C. Thorpe. Time-lapse cryptography. Technical Report TR-22-06, Harvard University School of Engineering and Computer Science, 2006.](http://www.eecs.harvard.edu/~cat/tlc.pdf) In short, the protocol uses Pedersen distributed key generation to generate and publish ElGamal keypairs according to a fixed schedule.
-
-Any implementation differences from the Rabin & Thorpe paper should be noted below.
-
-## Implementation philosophy
-
-This implementation is designed to be simple and secure, at the expense of automation and availability:
-
-* Private key material is kept only on offline servers. Each round of key generation and release requires human operators to migrate and process data manually. 
-* Key generation fails in the presence of improper Trustees (unlike Pedersen/Rabin & Thorpe, where key generation can continue with the subset of proper parties). If a Trustee fails to follow the protocol, key generation noisily fails until the problem is corrected manually.
-* Non-sensitive processing is handled by a single front-end server, rather than through a distributed consensus algorithm.
+As long as at least `recovery_threshold` Trustees: (a) follow the protocol, (c) safeguard their private key material until the
+`release_date`, and (c) publish their private key material on `release_date`, this protocol guarantees that the private 
+key *will not* be available before `release_date` and *will* be available after.
 
 ## Definitions
 
 ### Parties
 
-The `Trustees` are a group of legally, geographically, and technically distinct institutions around the world. To start with, the Trustees are likely to be a consortium of academic institutions.
+The `user` is a person who wishes to download a public key with a contract attached for later release of the private key.
 
-The `Coordinator` initiates key generation and provides user access to generated keys. The Coordinator has no special access to key material.
+The `Trustees` are independent keyholders, trusted by the user to enforce the contract.
 
-### Servers
-
-The `Coordination Server` is operated by the Coordinator.
-
-Each Trustee operates three servers:
-
-- The `Trustee Offline Server` is an airgapped computer where the Trustee stores key material and processes incoming and outgoing messages dealing with distributed key generation.
-
-- The `Trustee Inbox Server` receives incoming messages from the Coordinator or other Trustees and, if they have valid signatures, stores them for offline processing.
-
-- The `Trustee Outbox Server` stores offline messages from the Offline Server, sending them to the Coordinator or other Trustees at the appropriate time.
-
-### Identity keys
-
-The Coordinator is identified by a `Coordinator private key` stored on the Coordination Server. Compromise of the Coordinator's private key does not affect the security of the system.
-
-The Trustees are each identified by a `Trustee private key` stored on the Offline Server. Compromise of a Trustee's private key renders the Trustee improper.
-
-Other than these identity keys, all "keys" referred to in this document are distributed keys intended for time-based encryption.
+The `Coordinator` coordinates key generation and provides user access to generated keys, but has no special access to 
+key material and need not be trusted by the user.
 
 ### Magic numbers
 
 The Trustees share a set of predefined, public constants:
 
-`p` is a 4096-bit "safe" prime generated by `openssl dhparam -out dh4096.pem 4096`.
+- `p` is a 4096-bit "safe" prime.
+- `q` is the prime equal to `(p-1)/2`.
+- `g` is a generator in `p` of prime order `q`.
 
-`q` is the prime equal to `(p-1)/2`.
+## Protocol
 
-`g` is a generator of prime order `q`. In practice, `g` is the smallest value passing the tests in [PyCrypto's ElGamal key generation function](https://github.com/dlitz/pycrypto/blob/master/lib/Crypto/PublicKey/ElGamal.py#L161).
+### Key Generation
 
-The `recovery_threshold` is the number of Trustees who must participate in order to recover a given key.
+#### Overview
 
-## Message passing
+Key generation proceeds in three rounds. Each round consists of a message sent from the Coordinator to each Trustee, 
+and a response back from each Trustee to the Coordinator.
 
-Each of the Trustees maintains a Trustee Inbox Server that listens for messages from the Coordination Server and from other Trustees.
+At the end of the three rounds the Coordinator will have a public OpenPGP key signed by all Trustees, along with a
+*state object* that can be used to recover the private key. Parts of the state object will be encrypted, so the private
+key can only be recovered when `t` Trustees turn over their corresponding private keys.
 
-Once per week, each Trustee:
+#### Round One: Generate Contract Keypair
 
-1. Copies the incoming messages from the Inbox Server to the Offline Server.
-2. Confirms that the time on the Offline Server is correct.
-3. Runs a message processing script on the Offline Server.
-4. Copies outgoing messages from the Offline Server to the Outbox Server.
+In Round One, the Coordinator asks each Trustee to generate a new *contract keypair* for use with this contract.
+Each Trustee saves its `contract_private_key` locally, and returns the `contract_public_key`.
 
-Outgoing messages may be pre-dated, meaning they are marked to be sent by the Outbox Server at some point during the following week.
+**Round One Example:**
 
-This design means:
+(assuming `share_count` of 3 and `recovery_threshold` of 2)
 
-* Compromising the Inbox Server reveals no secret information to an attacker.
-* Compromising the Outbox Servers, at best, allows an attacker to decrypt messages one week early.
+Message to each Trustee:
 
-The Outbox Server is kept separate from the Inbox Server so that it can be configured to reject all incoming traffic.
+    {'uuid':uuid, 'action':'generate_keypair'}
 
-## Key generation protocol
+Response from Trustee 1:
 
-### Overview
-
-Keys are generated and published through a series of messages sent between the Coordination Server and the Trustees.
-
-Key generation proceeds in several steps:
-
-1. The Coordinator announces to the Trustees that a new keypair should be generated, identified by a universal unique identifier (UUID), and scheduled to be released on a certain date. Each Trustee generates a private `x` value, which will be its piece of the private key, and a public `y` value, which will be its piece of the public key. 
-2. Each Trustee splits its private `x` value into shares and sends those shares to the other Trustees. If any given Trustee loses its private value, it can be reconstructed by assembling a given threshold of shares from the other Trustees. 
-3. Each Trustee sends a confirmation to the Coordinator that it has received a valid share from each of the other Trustees. By examining those confirmations (which contain no secret information), the Coordinator or anyone else can confirm that the protocol is being followed correctly, and that the `x` values can all be recovered as long as the threshold number of Trustees remain uncompromised.
-4. The Coordinator generates a standard PGP public key using the `y` values received from the Trustees. The Coordinator asks each of the Trustees to compare the set of confirmations to the generated key, and to sign the key to indicate that it has been generated correctly. 
-
-Now the new PGP public key can be published by the Coordinator, and downloaded, verified and used to encrypt files by any user on the internet. Note that there is no corresponding private key yet: the private key won't exist until all of the `x` values are released by the Trustees and reassembled.
-
-Once per week, each Trustee checks its Offline Server for new outgoing messages. When the release date arrives, the Offline Server sends a message to the Coordinator with the private `x` value it generated earlier, and the shares of private `x` values it received from the other Trustees. As soon as the Coordinator receives the threshold number of releases, it uses them to generate and publish a standard PGP private key corresponding to the public key published earlier. Now any user can decrypt messages earlier encrypted with the public key.
-
-### Detailed structure of key generation messages
-
-This diagram shows the flow of messages for a simple network with three Trustees:
-
-![Key generation protocol diagram](design_diagram.gif)
-
-The steps shown in the diagram are as follows:
-
-### Round One: `generate_key`
-
-In Round One, the Coordination Server sends a message to each of the Trustees to trigger the generation of a new key, with a given release date and UUID.
-
-- Message: `generate_key`
-- From: Coordination Server
-- To: Trustees
-- Key_id: [uuid]
-- Values (encrypted):
-    - release_date: The date on which the generated private key should be published.
-
-### Round Two: `store_share`
-
-In Round Two, prompted by receiving a `generate_key` message, each Trustee generates its portion of an ElGamal key, and sends private shares and commitments to the other Trustees so they can verify that the key is recoverable.
-
-Internally, the Offline Server generates and stores the following values:
-
-- `x`: Private ElGamal key in the range `2 <= x <= q-1`
-- `y`: Public ElGamel key equal to `g^x % p`
-- `recovery_polynomial`: A polynomial for Shamir secret sharing of `x`, in the form `x + randint(q-1) * i + ... + randint(q-1) * i ^ (recovery_threshold-1)`
-- `recovery_shares`: One secret share for each other Trustee, in the form `{share_input: j, share_output: recovery_polynomial(j)}` for j in 1..trustee_count
-- `commitments`: A list of commitments the other Trustees can use to verify that they have received valid recovery_shares, in the form `g^coefficient % p` for each coefficient of the recovery_polynomial
-- `share_recipients`: A mapping of which other Trustee will be sent each recovery_share
-
-The Offline Server then sends a `store_share` message to each other Trustee:
-
-- Message: `store_share`
-- From: [each trustee]
-- To: [each other trustee]
-- Key_id: [uuid]
-- Values (encrypted):
-    - share_input: j
-    - share_output: recovery_polynomial(j)
-    - group_message:
-        - p: p
-        - g: g
-        - release_date: release_date
-        - y_share: y
-        - commitments: commitments
-        - share_recipients: share_recipients
-        
-### Round Three: `confirm_share`
-
-In Round Three, prompted by receiving a `store_share` message, each Recipient Trustee confirms that it has received a valid share from the Sending Trustee.
-
-Internally, the Recipient Trustee's Offline Server checks the following in the `store_share` message:
-
-- The Recipient Trustee received the correct share: the share_input matches the value in share_recipients.
-- The share_output matches the commitments: `g^share_output % p` is equal to the product of `commitment ^ share_input ^ i` for all commitments.
-
-If these two checks pass, then the Recipient Trustee publicly announces that it has received a valid share from the Sending Trustee:
-
-- Message: `confirm_share`
-- From: Recipient Trustee
-- To: Coordination Server
-- Key_id: [uuid]
-- Values (unencrypted):
-    - server_id: The Sending Trustee's ID.
-    - y_share: store_share -> group_message -> y_share
-    - share_input: store_share -> share_input
-    - is_valid: Whether the share passed the Recipient Trustee's checks.
-    - message_hash: A cryptographic hash of the group_message.
+    {'uuid':uuid, 'contract_public_key':contract_public_key1}
     
-### Round Four: `sign_key`
+Response from Trustee 2:
 
-In Round Four, the Coordination Server generates a GPG public key, using the `confirm_share` messages, and sends it to the Trustees for signing.
+    {'uuid':uuid, 'contract_public_key':contract_public_key2}
+    
+Response from Trustee 3:
 
-The Coordination Server first waits until it has received all of the necessary `confirm_share` messages. There should be `trustee_count * (trustee_count-1)` messages.
+    {'uuid':uuid, 'contract_public_key':contract_public_key3}
 
-The Coordination Server then confirms that:
+#### Round Two: Generate Share
 
-- Each Trustee reported receiving a valid share from each other Trustee.
-- The message_hash and y_share for each Sending Trustee matched among all Receiving Trustees.
-- Each Receiving Trustee for a given Sending Trustee received a different share_input.
+In Round Two, the Coordinator asks each Trustee to generate a share of an ElGamal keypair, as well as 
+verified-threshold subshares of that share for each of the other Trustees.
+
+Internally, each Trustee generates the following values:
+
+- `x`: a private ElGamal key in the range `2 <= x <= q-1`
+- `y`:  a public ElGamal key equal to `g^x % p`
+- `recovery_polynomial`: a polynomial for Shamir secret sharing of `x`, in the form `x + randint(q-1) * i + ... + randint(q-1) * i ^ (recovery_threshold-1)`
+- `subshares`: a share of `x` for each other Trustee, in the form `[recovery_polynomial(1), ..., recovery_polynomial(share_count)]`
+- `commitments`: A list of commitments the other Trustees can use to verify that they have received valid subshares, 
+    in the form `g^coefficient % p` for each random coefficient of the recovery_polynomial
+
+The Trustee returns the `x`, `y`, `subshares`, and `commitments` values to the Coordinator. 
+Any values that are not public are encrypted using the appropriate contract_public_key.
+
+**Round Two Example:**
+
+(assuming `share_count` of 3 and `recovery_threshold` of 2)
+
+Message to each Trustee:
+
+    {'uuid':uuid, 'action':'generate_share', 'contract_public_keys':[contract_public_key1, contract_public_key2, contract_public_key3]}
+
+Response from Trustee 1:
+
+    {
+        'uuid':uuid, 
+        'share':{
+            'contract_public_key': contract_private_key1,
+            'x':encrypt(contract_private_key1, contract_public_key1, x), 
+            'y':y,
+            'subshares':[encrypt(contract_private_key1, contract_public_key2, subshares1[0]), encrypt(contract_private_key1, contract_public_key2, subshares1[1])],
+            'commitments':[commitments1[0]],
+        }
+    }
+
+Response from Trustee 2:
+
+    {
+        'uuid':uuid, 
+        'share':{
+            'contract_public_key': contract_public_key2,
+            'x':encrypt(contract_private_key2, contract_public_key2, x), 
+            'y':y,
+            'subshares':[encrypt(contract_private_key2, contract_public_key1, subshares2[0]), encrypt(contract_private_key2, contract_public_key3, subshares2[1])],
+            'commitments':[commitments2[0]],
+        }
+    }
+   
+Response from Trustee 3:
+
+    {
+        'uuid':uuid, 
+        'share':{
+            'contract_public_key': contract_public_key3,
+            'x':encrypt(contract_private_key3, contract_public_key3, x), 
+            'y':y,
+            'subshares':[encrypt(contract_private_key3, contract_public_key1, subshares3[0]), encrypt(contract_private_key3, contract_public_key2, subshares3[1])],
+            'commitments':[commitments3[0]],
+        }
+    }
+  
+Importantly, `encrypt(private_key_1, public_key_2, message)` in these examples encrypts a message so it can only be read
+by the owner of private_key_2, but also allows the decrypter to verify that the message was sent by the owner of 
+private_key_1. 
+    
+#### Round Three: Verify GPG Key
+
+In Round Three, the Coordinator assembles all the shares from Round Two into a `state_object`, representing the
+`release_date`, `share_count`, `recovery_threshold`, and collected `shares`.
+
+The Coordinator uses the state_object to generate an OpenPGP ElGamal public key, having a `y` value equal to the product
+of the `y` value in each share, mod `p`.
+
+The user ID comment for the generated OpenPGP key takes this form:
+    
+    {
+        "state_digest": <digest>, 
+        "uuid": <uuid>, 
+        "contract": {
+            "release_date": "2015-06-25T21:12:33.652483+00:00", 
+            "recovery_threshold": recovery_threshold, 
+            "share_count": share_count,
+        }
+    }
  
-If all of these checks pass, the Coordination Server generates a new GPG keypair, consisting of:
+The Coordinator sends a message to each Trustee with the state object and the generated public key.
 
-- A randomly generated DSA signing key.
-- An ElGamal subkey, with a dummy `x` value and a `y` value equal to the product of the y_shares received from each Sending Trustee.
-- Metadata indicating the release_date for the key, the recovery_threshold, and the Trustees who must sign it for it to be valid.
+Each Trustee verifies that:
 
-The Coordination Server then sends this new GPG key to the Trustees for signing:
+- The number of shares is `share_count`.
+- For exactly one share:
+    - The Trustee possesses the corresponding `contract_private_key`.
+    - The Trustee can decrypt the `x` value, and therefore must have itself generated it in Round Two.
+    - The y value is equal to `g ^ x % p`.
+- For the remaining shares:
+    - The number of commitments is `recovery_threshold - 1`.
+    - The Trustee can decrypt one of the `subshare` values.
+    - The decrypted `subshare` value represents a unique point on a polynomial of order `recovery_threshold - 1` with a
+        y-intercept of `x`, as mathematically verified by the `y` and `commitments` values.
+- The contract, state_digest, p, g, and y values attached to the OpenPGP key are correct
 
-- Message: `sign_key`
-- From: Coordination Server
-- To: [each trustee]
-- Key_id: [uuid]
-- Values (encrypted):
-    - confirmations: List of all confirm_share messages
-    - public_key: The newly generated public key
-    - private_key: The newly generated private key (for backup)
+If all validations pass, the Trustee signs the OpenPGP key and returns its signature.
 
-### Round Five: `signed_key`
+**Round Three Example:**
 
-In Round Five, prompted by a `sign_key` message, each Trustee checks the list of confirmations and calculates a y value using the same process as the Coordination Server in Round Four.
+(assuming `share_count` of 3 and `recovery_threshold` of 2)
 
-If the confirmations are valid, and the y value matches the value in the public_key provided by the Coordination Server, and the public_key metadata matches the Trustee's internal records, the Trustee signs the key and returns it:
+Message to each Trustee:
 
-- Message: `signed_key`
-- From: Trustee
-- To: Coordination Server
-- Key_id: [uuid]
-- Values (unencrypted):
-    - public_key: Signed public key.
+    {
+        'uuid':uuid, 
+        'action':'verify_key', 
+        'combined_gpg_key':generate_elgamal_key(p, g, y, comment={uuid, state_digest, contract), 
+        'state':'{
+            'contract':{
+                'release_date':release_date, 
+                'share_count':share_count, 
+                'recovery_threshold':recovery_threshold
+            },
+            'shares':[
+                {
+                    'contract_public_key': contract_private_key1,
+                    'x':encrypt(contract_private_key1, contract_public_key1, x), 
+                    'y':y,
+                    'subshares':[encrypt(contract_private_key1, contract_public_key2, subshares1[0]), encrypt(contract_private_key1, contract_public_key2, subshares1[1])],
+                    'commitments':[commitments1[0]],
+                },
+                {
+                    'contract_public_key': contract_public_key2,
+                    'x':encrypt(contract_private_key2, contract_public_key2, x), 
+                    'y':y,
+                    'subshares':[encrypt(contract_private_key2, contract_public_key1, subshares2[0]), encrypt(contract_private_key2, contract_public_key3, subshares2[1])],
+                    'commitments':[commitments2[0]],
+                },
+                {
+                    'contract_public_key': contract_public_key3,
+                    'x':encrypt(contract_private_key3, contract_public_key3, x), 
+                    'y':y,
+                    'subshares':[encrypt(contract_private_key3, contract_public_key1, subshares3[0]), encrypt(contract_private_key3, contract_public_key2, subshares3[1])],
+                    'commitments':[commitments3[0]],
+                },
+            ]
+        }',
+    }
+
+Response from Trustee 1:
+
+    {'uuid':uuid, 'certificate':certificate(trustee_1_signing_key, combined_gpg_key)}
     
-### Publication of public key
+Response from Trustee 2:
 
-At this point, the Coordination Server should have received a `signed_key` message from each Trustee that was originally sent a `generate_key` message. This indicates that each Trustee agrees that the private key will be recoverable, on the release_date indicated in the key's metadata, as long as the threshold number of Trustees remains uncompromised.
-
-The Coordination Server may now publish the public key in response to user requests, along with the signatures from each Trustee. Any user downloading the key may verify its validity by confirming that it is signed by each of the Trustees listed in its metadata.
-
-### Round Six: `release_key`
-
-In Round Six, the Trustee Offline Servers discover that they possess a key whose release_date has arrived. They each send a message to the Coordination Server releasing their share of the private key:
- 
-- Message: `release_key`
-- From: [each trustee]
-- To: Coordination Server
-- Key_id: [uuid]
-- Values (unencrypted):
-    - x_share: x value generated during Round Two.
-    - recovery_shares: A tuple of `(trustee_id, share_input, share_output)` for each recovery share known to this Trustee.
+    {'uuid':uuid, 'certificate':certificate(trustee_2_signing_key, combined_gpg_key)}
     
-### Publication of private key
+Response from Trustee 3:
 
-As soon as the Coordination Server receives at least recovery_threshold release_key messages, it attempts to recover the private key. Recovery is attempted using every viable combination of x_shares and recovery_shares, so the private key will be recovered as soon as enough valid release_key messages are received.
+    {'uuid':uuid, 'certificate':certificate(trustee_3_signing_key, combined_gpg_key)}
 
-The Coordination Server then edits the GPG private key generated in Round Four to replace the dummy `x` value with the reconstructed private key, and publishes the private key to any user who requests it.
+### Key Use
+
+The Coordinator publishes the ElGamal public key along with the certificates obtained from all Trustees. 
+Any user can verify the key by independently obtaining the signing public keys of the Trustees, 
+and verifying that the key is signed by `share_count` Trustees.
+
+A user should not rely on a key with fewer than `share_count` trusted signatures, although the security properties are 
+in principle retained with at least `recovery_threshold` trusted signatures.
+
+### Key Recovery
+
+The `state_object` is public, and should be backed up by the Coordinator, Trustees, and any other interested party.
+
+Each Trustee should keep their `contract_private_key` on secure offline storage.
+
+When the `release_date` arrives, each Trustee should publish their `contract_private_key`. As soon as `recovery_threshold` 
+contract_private_keys are available, the ElGamal private key can be recovered, either by decrypting the `x` value for each
+share, or by recovering it using the subshares.
 
 ## Security Guarantees and Assumptions
 
-This system makes the following assumptions:
+The core security assumptions of this system are:
 
-- An encrypted message sent to a Trustee cannot be read without the Trustee's private key, which is stored only on the Offline Server or equally secure backup.
-- Messages sent to a Trustee cannot subvert (e.g. buffer overflow) the Offline Computer, causing it to exfiltrate or delete data.
+- At least `recovery_threshold` Trustees (known as the *compliant Trustees*) can be trusted to follow the protocol; to 
+    successfully protect their `contract_private_keys` and signing keys; and to publish their `contract_private_keys` 
+    on the `release_date`.
+- The adversary cannot decrypt encrypted portions of the `state_object` without the `contract_private_keys`.
+- The adversary cannot decrypt messages encrypted with an ElGamal OpenPGP key whose `y` value is the product of the `y` 
+    values in the `state_object`, without knowing the sum of the `x` values in the `state_object`.
+- The `state_digest` is a valid cryptographic hash of the `state_object`.
+    
+Assuming those assumptions are true, the following guarantees must be true of any OpenPGP key having signatures from
+`share_count` Trustees:
 
-Assuming those are true:
+- Because the `state_digest` is a valid cryptographic hash of the `state_object`, the compliant Trustees must each have 
+    verified the same `state_object`.
+- Because the compliant Trustees followed the protocol, they must have verified that the `p`, `g`, and `y` values in the
+    ElGamal OpenPGP key match the values in the `state_object`.
+- Because messages encrypted with the ElGamal OpenPGP key use the product of the `y` values in the `state_object`, they
+    cannot be decrypted until the `x` values in the `state_object` are decrypted.
+- Because the adversary cannot decrypt encrypted portions of the `state_object` without the `contract_private_keys`, the
+    `x` values belonging to the compliant Trustees will not be available until they published their `contract_private_keys`
+    on `release_date`.
+- Because the compliant Trustees followed the protocol, they must have mathematically verified that each `share` other than
+    their own included a `subshare`, encrypted to their `contract_private_key`, that could be used in combination with
+    any `recovery_threshold - 1` other `subshares` to recover the `x` value for that share.
+    - Because there are at least `recovery_threshold` compliant Trustees, once the compliant Trustees publish their
+    `contract_private_keys` it must be possible to decrypt at least `recovery_threshold` subshares for any `share` which
+    lacks a compliant Trustee to decrypt the `x` value directly. Therefore, all `x` values must be recoverable as soon as
+    `recovery_threshold` compliant Trustees publish their `contract_private_keys`.
 
-- As long as the threshold number of Trustees do not voluntarily release the private key early, and do not have the Offline Server stolen or seized, messages encrypted with the public key cannot be released prior to the release_date.
-- As long as the threshold number of Trustees preserve the data on the Offline Server, and release it on schedule, messages encrypted with the public key can be released at any time after the release date.
-- An attacker who subverts the Coordination Server or the Trustee Inbox Servers cannot access encrypted messages early. Such an attacker can, however, temporarily delay the generation of new public or private keys.
-- An attacker who subverts the threshold number of Trustee Outbox Servers can access new keys up to one week early.
+
+
+## References
+
+This system implements the cryptographic protocol described in 
+[M. O. Rabin and C. Thorpe. Time-lapse cryptography. Technical Report TR-22-06, Harvard University School of Engineering and Computer Science, 2006.](http://www.eecs.harvard.edu/~cat/tlc.pdf) 
+
+In short, the protocol uses Pedersen distributed key generation to generate and publish ElGamal keypairs according to a fixed schedule.

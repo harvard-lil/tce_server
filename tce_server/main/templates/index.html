@@ -1,60 +1,80 @@
-<html>
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <!-- Latest compiled and minified CSS -->
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.5/css/bootstrap.min.css">
+
+        <!-- Optional theme -->
+        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.5/css/bootstrap-theme.min.css">
+
+        <!-- Latest compiled and minified JavaScript -->
+        <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.5/js/bootstrap.min.js"></script>
+    </head>
     <body>
-        <h1>Time Capsule Encryption</h1>
+        <div class="container">
+            <div class="page-header">
+                <h1>Time Capsule Encryption Demo</h1>
+            </div>
 
-        <h2>Download public keys to send messages into the future ...</h2>
+            <h2>Download public keys to send messages into the future ...</h2>
 
-        <table>
-            <tr>
-                <th>Release Date</th><th>Public Key</th><th>Upload</th>
-            </tr>
-            {% for keypair in public_keys %}
+            <table class="table">
                 <tr>
-                    <td>{{ keypair.release_date_display }}</td>
-                    <td>
-                        {% if keypair.public_key_file %}
-                            <a href="{% url 'public_key_file' keypair.pk %}">download encryption key</a>
-                        {% endif %}
-                    </td>
-                    <td>
-                        <form action="{% url 'encrypt' keypair.pk %}" method="post" enctype="multipart/form-data">
-                            {% csrf_token %}
-                            Encrypt file server-side:
-                            <input type="file" name="file">
-                            <input type="submit" value="Encrypt" name="submit">
-                        </form>
-                    </td>
+                    <th>Release Date</th><th>Public Key</th>{% comment %}<th>Upload</th>{% endcomment %}
                 </tr>
-            {% endfor %}
-        </table>
+                {% for keypair in public_keys %}
+                    <tr>
+                        <td>{{ keypair.release_date_display }}</td>
+                        <td>
+                            {% if keypair.public_key_file %}
+                                <a href="{% url 'public_key_file' keypair.pk %}">download encryption key</a>
+                            {% endif %}
+                        </td>
 
-        <h2>Download private keys to decrypt messages from the past ...</h2>
+                        {% comment %}
+                        <td>
+                            <form class="form-inline" action="{% url 'encrypt' keypair.pk %}" method="post" enctype="multipart/form-data">
+                                {% csrf_token %}
+                                Encrypt file server-side:
+                                <input type="file" name="file">
+                                <input type="submit" value="Encrypt" name="submit" class="btn btn-default">
+                            </form>
+                        </td>
+                        {% endcomment %}
+                    </tr>
+                {% endfor %}
+            </table>
 
-        <div>
-            <form action="{% url 'decrypt' %}" method="post" enctype="multipart/form-data">
-                {% csrf_token %}
-                Decrypt file server-side:
-                <input type="file" name="file">
-                <input type="submit" value="Decrypt" name="submit">
-            </form>
+            <h2>Download private keys to decrypt messages from the past ...</h2>
+
+            {% comment %}
+                <div>
+                    <form class="form-inline" action="{% url 'decrypt' %}" method="post" enctype="multipart/form-data">
+                        {% csrf_token %}
+                        <div class="form-group">
+                            Decrypt file server-side:
+                            <input type="file" name="file" class="form-control" >
+                        </div>
+                        <input type="submit" value="Decrypt" name="submit" class="btn btn-default">
+                    </form>
+                </div>
+            {% endcomment %}
+
+            <table class="table">
+                <tr>
+                    <th>Release Date</th><th>Private Key</th>
+                </tr>
+                {% for keypair in private_keys %}
+                    <tr>
+                        <td>{{ keypair.release_date_display }}</td>
+                        <td>
+                            {% if keypair.private_key_file %}
+                                <a href="{% url 'private_key_file' keypair.pk %}">download decryption key</a>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+            </table>
         </div>
-
-        <table>
-            <tr>
-                <th>Release Date</th><th>Private Key</th><th>Upload</th>
-            </tr>
-            {% for keypair in private_keys %}
-                <tr>
-                    <td>{{ keypair.release_date_display }}</td>
-                    <td>
-                        {% if keypair.private_key_file %}
-                            <a href="{% url 'private_key_file' keypair.pk %}">download decryption key</a>
-                        {% endif %}
-                    </td>
-                    <td>
-                    </td>
-                </tr>
-            {% endfor %}
-        </table>
     </body>
 </html>

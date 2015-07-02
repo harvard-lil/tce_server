@@ -11,7 +11,8 @@ from pgpdump.packet import PublicKeyEncryptedSessionKeyPacket
 from pgpdump.utils import PgpdumpException
 
 from .models import Message, KeyPair
-from scripts.gpg_utils import load_gpg
+from trustee.utils import gpg_encrypt, gpg_decrypt
+from main.utils import load_gpg, gpg_encrypt, gpg_decrypt
 
 ### view helpers ###
 
@@ -71,7 +72,7 @@ def get_messages(request):
         return HttpResponseBadRequest("Can't parse after_id.")
 
     messages = trustee.messages_received.filter(id__gt=after_id)
-    out = json.dumps([(message.id, message.signed_message) for message in messages])
+    out = json.dumps([(message.id, message.content) for message in messages])
     return HttpResponse(out, content_type="application/json")
 
 
@@ -84,38 +85,18 @@ def send_message(request):
     if request.method != "POST":
         return HttpResponseNotAllowed(["POST"])
 
-    if not request.POST.get("message"):
-        return HttpResponseBadRequest("message is required")
+    message = get_object_or_404(Message, pk=request.POST.get('message_id'), to_trustee=trustee)
 
-    with load_gpg([trustee.key]) as gpg:
-        verified_message = gpg.decrypt(request.POST["message"])
+    if not request.POST.get("response"):
+        return HttpResponseBadRequest("response is required")
 
-    if verified_message.fingerprint != trustee.fingerprint:
-        return HttpResponseForbidden("Fingerprint does not match.")
+    if not request.POST.get("status") in ("success", "failed"):
+        return HttpResponseBadRequest("unrecognized status")
 
-    json_data = verified_message.data[:-1]  # strip extra \n that gpg adds
-
-    try:
-        json_dict = json.loads(json_data)
-    except ValueError:
-        return HttpResponseBadRequest("Can't parse message JSON.")
-
-    if json_dict.get("from") != trustee.fingerprint:
-        return HttpResponseBadRequest("Message 'from' does not match signature.")
-
-    try:
-        message = Message.from_json_dict(json_dict)
-    except ValueError as e:
-        return HttpResponseBadRequest(e.args[0])
-
-    message.signed_message = request.POST["message"]
-
-    try:
-        message.save()
-    except DatabaseError as e:
-        return HttpResponseBadRequest(e.args[0])
-
-    message.process_message()
+    message.response = request.POST["response"]
+    message.response_status = request.POST["status"]
+    message.save()
+    message.process_message_response()
 
     return HttpResponse("OK")
 
@@ -151,8 +132,7 @@ def encrypt(request, key_id):
     if not uploaded_file:
         return HttpResponseBadRequest("Please supply a file upload.")
 
-    with load_gpg([keypair.public_key_file]) as gpg:
-        output = gpg.encrypt(uploaded_file.read(), gpg.list_keys().fingerprints[0])
+    output = gpg_encrypt(keypair.public_key_file, uploaded_file.read())
 
     return deliver_file(output, 'application/pgp-encrypted', uploaded_file.name+'.gpg')
 
@@ -186,8 +166,7 @@ def decrypt(request):
         return HttpResponseBadRequest("We do not yet have a private key to decrypt this file (release date %s)." % keypair.release_date_display())
 
     # decrypt
-    with load_gpg([keypair.private_key_file]) as gpg:
-        output = gpg.decrypt(file_contents, always_trust=True)
+    output = gpg_decrypt(keypair.private_key_file, file_contents)
 
     if not output.ok:
         return HttpResponseBadRequest("Unable to decrypt file.")

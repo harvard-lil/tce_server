@@ -1,11 +1,9 @@
 import calendar
 from collections import defaultdict
 from datetime import datetime
+import hashlib
 import json
-import subprocess
-import tempfile
 import uuid
-import itertools
 
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -15,9 +13,11 @@ from django.utils.functional import cached_property
 from django.utils import dateformat
 from pgpdump import AsciiData
 from pgpdump.packet import PublicSubkeyPacket
+import pgpy
 
-from scripts.gpg_utils import load_gpg
-from scripts.multielgamal import MultiElGamal
+from trustee.utils import int_b64decode
+from main.utils import load_gpg, generate_public_elgamal_key, update_private_elgamal_key, apply_certificates
+from trustee.multielgamal import MultiElGamal
 
 
 ### custom model fields ###
@@ -98,92 +98,165 @@ class KeyPair(models.Model):
     private_key_file = models.TextField(blank=True)
     elgamal_key_id = models.CharField(unique=True, max_length=255, blank=True, null=True)
 
+    state = models.TextField(blank=True, null=True)
+
     def __unicode__(self):
         return self.uuid
 
-    def send_generate_key_messages(self):
+
+    def message_trustees(self, message_type, arguments=None):
         this_trustee = Trustee.objects.get(this_server=True)
-        for trustee in self.trustees.exclude(this_server=True):
+        for trustee in self.trustees.all():
             message = Message(timestamp=datetime.now(),
-                              message_type='generate_key',
+                              message_type=message_type,
                               from_trustee=this_trustee,
                               to_trustee=trustee,
                               keypair=self)
-            message.encrypt_content(trustee, {'release_date':calendar.timegm(self.release_date.utctimetuple())})
-            message.sign_message()
+            message.set_content(arguments)
             message.save()
 
-    def check_confirmations(self):
-        if not(self.status == 'generating' or self.status == 'public_key_failed'):
+
+    def serialized_release_date(self):
+        return self.release_date.isoformat()
+
+    def have_all_messages(self, message_type):
+        messages = list(self.messages.filter(message_type=message_type, response_status__in=('success', 'failed')).select_related('to_trustee'))
+        all_trustees = list(self.trustees.all())
+        if len(messages) != len(all_trustees) or set(message.to_trustee for message in messages) != set(all_trustees):
+            # don't have all messages yet
+            return None, False
+
+        failures = [m for m in messages if m.response_status == 'failed']
+        if failures:
+            self.save_errors('public_key_failed', [dict((str(m), m.response)) for m in failures])
+            return None, True
+
+        return messages, False
+
+    def save_errors(self, status, details):
+        print "Errors!", details
+        self.status = status
+        self.status_detail += "Errors generating public key:\n" + json.dumps(details, indent=4)
+        self.save()
+
+    def send_generate_key_messages(self):
+        self.message_trustees('generate_contract_keypair')
+
+    def handle_generate_contract_keypair_response(self):
+        if not self.status == 'generating':
             return
 
-        # check if we have enough confirmations yet
-        trustee_count = self.trustees.count()
-        expected_share_count = trustee_count*(trustee_count-1)  # each trustee should have a confirmed share for each other trustee
-        confirmation_messages = list(self.messages.filter(message_type='confirm_share'))
-        if len(confirmation_messages) < expected_share_count:
+        messages, failure = self.have_all_messages('generate_contract_keypair')
+        if failure or not messages:
             return
 
         errors = {}
+        contract_public_keys = []
+        for message in messages:
+            trustee_errors = []
+            if message.response_dict.get('uuid') != self.uuid:
+                trustee_errors.append("UUID doesn't match.")
+            if not message.response_dict.get('contract_public_key'):
+                trustee_errors.append("contract_public_key is missing.")
 
-        # check if we have all the public key shares
-        y_shares_by_trustee = {}
-
-        # parse the confirmation messages
-        confirmations = []
-        for message in confirmation_messages:
-            confirmations.append({
-                'confirming_server': message.from_trustee,
-                'confirmed_server': Trustee.objects.get(fingerprint=message.content_dict['server_id']),
-                'y_share': message.content_dict['y_share'],
-                'share_input': message.content_dict['share_input'],
-                'is_valid': message.content_dict['is_valid'],
-                'message_hash': message.content_dict['message_hash']})
-
-        # check confirmations grouped by confirmed server
-        confirmations.sort(key=lambda c: c['confirmed_server'].pk)
-        grouped_confirmations = itertools.groupby(confirmations, lambda c: c['confirmed_server'].pk)  # must be sorted first
-        for confirmed_server_id, confirmations in grouped_confirmations:
-            server_errors = []
-
-            confirmations = list(confirmations)
-            confirmed_server = confirmations[0]['confirmed_server']
-            if len(confirmations) != trustee_count-1:
-                server_errors.append("Wrong number of confirmations received.")
-
-            if len(set(c['message_hash'] for c in confirmations)) != 1:
-                server_errors.append("Message hashes do not match.")
-
-            if len(set(c['y_share'] for c in confirmations)) != 1:
-                server_errors.append("Y shares do not match.")
-
-            if set(c['share_input'] for c in confirmations) != set(range(1, len(confirmations)+1)):
-                server_errors.append("Wrong set of share inputs.")
-
-            for c in confirmations:
-                if not c['is_valid']:
-                    server_errors.append("Server %s reports share is invalid." % c['confirming_server'].fingerprint)
-
-            if server_errors:
-                errors[confirmed_server.fingerprint] = server_errors
+            if trustee_errors:
+                errors[str(message.to_trustee)] = trustee_errors
             else:
-                y_shares_by_trustee[confirmed_server] = confirmations[0]['y_share']
-
-        if set(y_shares_by_trustee.keys()) != set(self.trustees.all()):
-            errors['__all__'] = 'Failed to recover all expected y values.'
+                contract_public_keys.append(message.response_dict['contract_public_key'])
 
         if errors:
-            self.status = 'public_key_failed'
-            self.status_detail += "Errors generating public key:\n"+json.dumps(errors, indent=4)
+            self.save_errors('public_key_failed', errors)
 
         else:
-            self.status = 'have_public_key'
+            self.message_trustees('generate_share', {
+                'contract_public_keys': contract_public_keys,
+                'recovery_threshold': self.recovery_threshold,
+            })
+
+    def handle_generate_share_response(self):
+        if not self.status == 'generating':
+            return
+
+        messages, failure = self.have_all_messages('generate_share')
+        if failure or not messages:
+            return
+
+        errors = {}
+        shares = {}
+        for message in messages:
+            trustee_errors = []
+            if message.response_dict.get('uuid') != self.uuid:
+                trustee_errors.append("UUID doesn't match.")
+
+            contract_public_key = self.messages.get(message_type='generate_contract_keypair', to_trustee=message.to_trustee, response_status='success').response_dict['contract_public_key']
+
+            if trustee_errors:
+                errors[str(message.to_trustee)] = trustee_errors
+            else:
+                shares[contract_public_key] = message.response_dict['share']
+
+        if errors:
+            self.save_errors('public_key_failed', errors)
+
+        else:
+            state = {
+                'uuid': self.uuid,
+                'contract': self.get_contract(),
+                'shares': shares,
+            }
+            self.state = json.dumps(state)
             mg = MultiElGamal(p=self.p, g=self.g)
-            self.y = mg.combine_public_keys(y_share for y_share in y_shares_by_trustee.values())
+            self.y = mg.combine_public_keys(int_b64decode(share['y']) for share in shares.values())
+            self.save()
+            self.generate_public_key_file()
 
-        self.save()
+            self.message_trustees('validate_combined_key', {
+                    'state': self.state,
+                    'combined_gpg_key': self.public_key_file,
+                })
 
-        self.generate_key_files()
+    def handle_validate_combined_key_response(self):
+        if not self.status == 'generating':
+            return
+
+        messages, failure = self.have_all_messages('validate_combined_key')
+        if failure or not messages:
+            return
+
+        errors = {}
+        certs = []
+        for message in messages:
+            trustee_errors = []
+            if message.response_dict.get('uuid') != self.uuid:
+                trustee_errors.append("UUID doesn't match.")
+
+            if trustee_errors:
+                errors[str(message.to_trustee)] = trustee_errors
+            else:
+                cert = pgpy.PGPSignature.from_blob(message.response_dict['certificate'])
+                certs.append(cert)
+
+        if errors:
+            self.save_errors('public_key_failed', errors)
+
+        else:
+            self.public_key_file = apply_certificates(self.public_key_file, certs)
+            self.status = 'have_public_key'
+            self.save()
+
+    def get_contract(self):
+        return {
+            'release_date': self.serialized_release_date(),
+            'recovery_threshold': self.recovery_threshold,
+            'share_count': self.trustees.count(),
+        }
+
+    def get_gpg_info(self):
+        return {
+            'uuid': self.uuid,
+            'contract': self.get_contract(),
+            'state_digest': hashlib.sha256(self.state).hexdigest()
+        }
 
     def check_releases(self):
         if self.status == 'have_private_key':
@@ -217,24 +290,12 @@ class KeyPair(models.Model):
 
         self.generate_private_key_file()
 
-    def generate_key_files(self):
-        if self.status != 'have_public_key':
+    def generate_public_key_file(self):
+        if self.public_key_file:
             return
 
-        hex_out = lambda x: hex(x)[2:].rstrip('L')  # Convert int to hex, stripping extra. E.g.:  10 -> '0xaL' -> 'a'
-
-        public_key_file = tempfile.NamedTemporaryFile(delete=False)
-        public_key_file.close()
-        private_key_file = tempfile.NamedTemporaryFile(delete=False)
-        private_key_file.close()
-
-        subprocess.check_call(['java', '-jar', settings.CREATE_KEY_FILE_JAR, 'create', hex_out(self.p), hex_out(self.g), hex_out(self.y), private_key_file.name, public_key_file.name, "Time capsule key for %s" % self.release_date_display()])
-
-        self.public_key_file = open(public_key_file.name).read()
-        self.temp_private_key_file = open(private_key_file.name).read()
-
-        public_key_file.unlink(public_key_file.name)
-        private_key_file.unlink(private_key_file.name)
+        identity = "Time capsule key for %s (%s)" % (self.release_date_display(), json.dumps(self.get_gpg_info()))
+        self.public_key_file, self.temp_private_key_file = generate_public_elgamal_key(self.p, self.g, self.y, identity)
 
         # get key id
         parsed_key = AsciiData(self.public_key_file)
@@ -247,29 +308,12 @@ class KeyPair(models.Model):
         if self.status != 'have_private_key':
             return
 
-        hex_out = lambda x: hex(x)[2:].rstrip('L')  # Convert int to hex, stripping extra. E.g.:  10 -> '0xaL' -> 'a'
-
-        old_private_key_file = tempfile.NamedTemporaryFile(delete=False)
-        old_private_key_file.write(self.temp_private_key_file)
-        old_private_key_file.close()
-        new_private_key_file = tempfile.NamedTemporaryFile(delete=False)
-        new_private_key_file.close()
-
-        subprocess.check_call(['java', '-jar', settings.CREATE_KEY_FILE_JAR,
-                               'add',
-                               old_private_key_file.name,
-                               hex_out(self.x),
-                               new_private_key_file.name])
-
-        self.private_key_file = open(new_private_key_file.name).read()
-
-        old_private_key_file.unlink(old_private_key_file.name)
-        new_private_key_file.unlink(new_private_key_file.name)
+        self.private_key_file = update_private_elgamal_key(self.temp_private_key_file, self.x)
 
         self.save()
 
     def release_date_display(self):
-        return dateformat.format(self.release_date, "N j, Y gA")
+        return dateformat.format(self.release_date, "N j, Y")  # gA")
 
 class Message(models.Model):
     uuid = UUIDField()
@@ -277,14 +321,26 @@ class Message(models.Model):
     from_trustee = models.ForeignKey(Trustee, blank=True, null=True, related_name='messages_sent')
     to_trustee = models.ForeignKey(Trustee, blank=True, null=True, related_name='messages_received')
     timestamp = models.DateTimeField()
-    message_type = models.CharField(max_length=20, choices=((i,i) for i in ('generate_key', 'store_share', 'confirm_share', 'release_key')))
+    message_type = models.CharField(max_length=20, choices=((i,i) for i in ('generate_key', 'store_share', 'combine_share', 'confirm_share', 'release_key')))
     keypair = models.ForeignKey(KeyPair, related_name='messages')
     content = models.TextField()
+
+    response_status = models.CharField(default='waiting', max_length=20, choices=((i,i) for i in ('waiting', 'success', 'failed')))
+    response = models.TextField(blank=True, null=True)
 
     signed_message = models.TextField()
 
     class Meta:
         ordering = ['-timestamp']
+
+    def set_content(self, arguments=None):
+        message = {
+            'action': self.message_type,
+            'uuid': self.keypair.uuid
+        }
+        if arguments:
+            message.update(arguments)
+        self.content = json.dumps(message)
 
     def sign_message(self):
         this_trustee = Trustee.objects.get(this_server=True)
@@ -345,26 +401,18 @@ class Message(models.Model):
 
         return Message(**json_dict)
 
-    def process_message(self):
-        if self.message_type == 'confirm_share':
-            self.keypair.check_confirmations()
-        elif self.message_type == 'release_key':
-            self.keypair.check_releases()
+    def process_message_response(self):
+        if self.message_type == 'generate_contract_keypair':
+            self.keypair.handle_generate_contract_keypair_response()
+        if self.message_type == 'generate_share':
+            self.keypair.handle_generate_share_response()
+        elif self.message_type == 'validate_combined_key':
+            self.keypair.handle_validate_combined_key_response()
 
     @cached_property
     def content_dict(self):
-        """
-            Try to parse message content as JSON, decrypting first if necessary.
-        """
-        if self.to_trustee:
-            if self.to_trustee.this_server:
-                with load_gpg([self.to_trustee.key]) as gpg:
-                    decrypted_content = gpg.decrypt(self.content)
-                if not decrypted_content.ok:
-                    raise ValueError("Couldn't decrypt message content: %s." % decrypted_content.stderr)
-                content = decrypted_content.data
-            else:
-                raise ValueError("Content is encrypted for another server.")
-        else:
-            content = self.content
-        return json.loads(content)
+        return json.loads(self.content)
+
+    @cached_property
+    def response_dict(self):
+        return json.loads(self.response)
