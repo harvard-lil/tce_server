@@ -15,6 +15,7 @@ from pgpy.constants import SignatureType
 
 # local imports
 from .multielgamal import MultiElGamal
+from .utils import int_b64encode, int_b64decode
 from . import message_schemas
 
 
@@ -50,17 +51,6 @@ def get_valid_json(json_message, schema):
         raise ProcessingError("Can't validate json: %s." % e.message)
 
     return message
-
-def int_b64encode(i):
-    b = bytearray()
-    while i:
-        b.append(i & 0xFF)
-        i >>= 8
-    return b64encode(bytes(b))
-
-def int_b64decode(s):
-    b = bytearray(b64decode(s))
-    return sum((1 << (bi * 8)) * bb for (bi, bb) in enumerate(b))
 
 ### message processing ###
 

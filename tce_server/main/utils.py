@@ -86,6 +86,7 @@ def update_private_elgamal_key(private_key, x):
 def apply_certificates(public_key, certificates):
     public_key, _ = pgpy.PGPKey.from_blob(public_key)
     for cert in certificates:
+        cert = pgpy.PGPSignature.from_blob(cert)
         public_key.userids[0] |= cert
     return str(public_key)
 

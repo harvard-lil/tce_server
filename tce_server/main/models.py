@@ -233,8 +233,7 @@ class KeyPair(models.Model):
             if trustee_errors:
                 errors[str(message.to_trustee)] = trustee_errors
             else:
-                cert = pgpy.PGPSignature.from_blob(message.response_dict['certificate'])
-                certs.append(cert)
+                certs.append(message.response_dict['certificate'])
 
         if errors:
             self.save_errors('public_key_failed', errors)

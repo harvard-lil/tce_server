@@ -41,13 +41,16 @@ class TestOfflineProcessor(unittest2.TestCase):
 
         # set up the trustees
         cls.trustees = []
+        files_dir = os.path.join(os.path.dirname(__file__), 'files')
         for i in range(3):
             trustee = {}
             trustee['temp_dir'] = tempdir.TempDir()
+            trustee['private_signing_key'] = open(os.path.join(files_dir, 'trustee_%s_private_key.asc' % (i+1))).read()
+            trustee['public_signing_key'] = open(os.path.join(files_dir, 'trustee_%s_public_key.asc' % (i+1))).read()
             trustee['settings'] = {
                 'p': cls.p,
                 'g': cls.g,
-                'private_signing_key': open(os.path.join(os.path.dirname(__file__), 'files/trustee_%s_private_key.asc' % (i+1))).read(),
+                'private_signing_key': trustee['private_signing_key'],
                 'contract_private_key_dir': trustee['temp_dir'].name,
             }
             cls.trustees.append(trustee)
@@ -99,7 +102,7 @@ class TestOfflineProcessor(unittest2.TestCase):
         cls.third_round_responses = [process_message(cls.third_round_message, trustee['settings']) for trustee in cls.trustees]
 
         # create signed public key
-        certs = [pgpy.PGPSignature.from_blob(response['certificate']) for response in cls.third_round_responses]
+        certs = [response['certificate'] for response in cls.third_round_responses]
         cls.signed_gpg_key = apply_certificates(cls.public_gpg_key, certs)
 
         # recover private key
@@ -131,7 +134,7 @@ class TestOfflineProcessor(unittest2.TestCase):
 
     def test_gpg_keys_work(self):
         message = "This is a test."
-        self.assertEqual(message, gpg_decrypt(self.private_gpg_key, gpg_encrypt(self.public_gpg_key, message)))
+        self.assertEqual(message, gpg_decrypt(self.private_gpg_key, gpg_encrypt(self.signed_gpg_key, message)))
 
     def test_gpg_params(self):
         private_key, _ = pgpy.PGPKey.from_blob(self.private_gpg_key)
@@ -143,3 +146,9 @@ class TestOfflineProcessor(unittest2.TestCase):
         self.assertEqual(elgamal_keymaterial.g, self.g)
         self.assertEqual(elgamal_keymaterial.y, self.y)
         self.assertEqual(elgamal_keymaterial.x, self.recovered_x)
+
+    def test_gpg_key_is_signed_by_all_trustees(self):
+        signed_gpg_key, _ = pgpy.PGPKey.from_blob(self.signed_gpg_key)
+        for trustee in self.trustees:
+            trustee_signing_key, _ = pgpy.PGPKey.from_blob(trustee['public_signing_key'])
+            trustee_signing_key.verify(signed_gpg_key)
