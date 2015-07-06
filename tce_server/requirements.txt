@@ -1,7 +1,9 @@
 celery==3.1.17
 Django==1.7.4
+django-extensions==1.5.0
 Fabric==1.10.1
 gnupg==1.4.0
+pgpdump==1.5
 secretsharing==0.2.6
 tempdir==0.6
 unittest2==1.0.1
